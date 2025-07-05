@@ -1,0 +1,133 @@
+parameters:
+  - name: Template
+    type: string
+    default: 'Dappverse-asp-net-core-web-template'
+
+  - name: orgname
+    type: string
+    default: 'Dappverse'
+
+  - name: projname
+    type: string
+    default: 'Alz'
+
+  - name: reponame_create
+    displayName: "New Repository name"
+    type: string
+
+  - name: appname
+    displayName: "Application Name"
+    type: string
+
+variables:
+  terraform-git-ssh-pub: >
+    ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDOE/q/2B4oEgE1ljydRnc08K9h09l7DfxA1voxlKoIkOrRB3kTi8AKrpwW8GEuXaXaCu6gnGGoJA0sXg4Z8eM4kaW9L0Awxp8gAp45GigLh2/cQLZrIjLSRIC8XOwck62sSpOmHkUbqlJyxGjDbzSLsFeoMq49VPuAx593ZHJ0zg2B49gOENdsCIR4FSgUWPj51Q0iSSDbLsdE/B5GxIwIQ+DJQQDlNrLlyvI5BIjbzFvqJFjy5rfVpdhPYJ2uR6Fxg1DJJQ44Qkqm6Ue9CXGRA96gmNALHPYdpZRJq44R1eAROKaFBfSYliErULmLIOncEiuQcrLNGYsdboQkxouBOHJBFNJWlhTOjTQYvGlF3IJkQPp9h/6V3w1t0tF4BlSOWORTKhSEb6C0VrvxTiXaDhnJZJLo5VJtsjCAeoT7bn+8EYZ2y6r4e3Pj08DMv4MYaV2np/f/3KFaRspIWc3tO6AIGy0I8KQPrYB9aSBPrXu6PivD0rMO6Petr/akC6QXk68fMoiOa+qLSVVGFvRkFsZlX5jJffOYEzPnp6T+yb6imWlC14F7ClOBmwtyQwLw4SGQ+GSRPQwQ8oT358xb/wXqfdVOJh5hUN0BI+MKftgE0bmVAH0reFwhaiTNRJPKmXJQRPvVEqiyq2KoBUUv3odzvVeEKk2ecfPIHJbQiw== your_email@example.com
+
+steps:
+- checkout: self
+  persistCredentials: true  
+   
+- task: InstallSSHKey@0
+  displayName: 'Install an SSH key'
+  inputs:
+    knownHostsEntry: $(known_host)
+    sshPublicKey: $(terraform-git-ssh-pub)
+    sshKeySecureFile: id_rsa
+
+- powershell: |
+    $ErrorActionPreference = "Stop"
+
+    echo $(PAT) | az devops login
+
+    $repositoryid = az repos create --name "${{ parameters.reponame_create }}" `
+      --organization "https://dev.azure.com/${{ parameters.orgname }}" `
+      --project "${{ parameters.projname }}"
+
+    git clone -q git@ssh.dev.azure.com:v3/${{ parameters.orgname }}/${{ parameters.projname }}/${{ parameters.Template }}
+
+    cd "${{ parameters.Template }}"
+    git config --global user.email "devops@Dappverse.com"
+    git config --global user.name "Devops"
+
+    git commit -am "Copied from project template"
+    git remote rename origin template
+    git remote add origin git@ssh.dev.azure.com:v3/${{ parameters.orgname }}/${{ parameters.projname }}/${{ parameters.reponame_create }}
+    git push -u origin --all
+
+    git checkout -b dev
+    git checkout -b qa
+    git checkout -b pre-prod
+    git push -u origin --all
+
+    $repos = $repositoryid | ConvertFrom-Json
+    $ri = $repos.id
+    echo "##vso[task.setvariable variable=ri]$ri"
+
+    Write-Host "===Creating branch policies on main branch"
+
+    Write-Host '======Policy: Require a minimum number of reviewers'
+    $policyApproverCount = az repos policy approver-count create `
+      --allow-downvotes false --blocking true --branch main `
+      --creator-vote-counts false --enabled true --minimum-approver-count 1 `
+      --repository-id $ri --reset-on-source-push false `
+      --project "${{ parameters.projname }}" `
+      --organization "https://dev.azure.com/${{ parameters.orgname }}" | ConvertFrom-Json
+
+    Write-Host '======Policy: Checked for linked work items'
+    $policyWorkItemLinking = az repos policy work-item-linking create `
+      --blocking true --branch main --enabled true --repository-id $ri `
+      --project "${{ parameters.projname }}" `
+      --organization "https://dev.azure.com/${{ parameters.orgname }}" | ConvertFrom-Json
+
+    Write-Host '======Policy: Checked for comment resolution'
+    $policyCommentRequired = az repos policy comment-required create `
+      --blocking true --branch main --enabled true --repository-id $ri `
+      --project "${{ parameters.projname }}" `
+      --organization "https://dev.azure.com/${{ parameters.orgname }}" | ConvertFrom-Json
+
+    Write-Host '======Policy: Automatically include code reviewers'
+    if ($Reviewers -and $Reviewers -ne "") {
+    Write-Host '======Policy: Automatically include code reviewers'
+    $policyRequiredReviewer = az repos policy required-reviewer create `
+      --blocking true --branch main --enabled true --repository-id $ri `
+      --message "main" --required-reviewer-ids $Reviewers `
+      --project "${{ parameters.projname }}" `
+      --organization "https://dev.azure.com/${{ parameters.orgname }}" | ConvertFrom-Json
+    Write-Host '======Created on:' $policyRequiredReviewer.createdDate
+    } else {
+        Write-Host "⚠️ Skipping required-reviewer policy - no reviewer IDs provided."
+    }
+    #$policyRequiredReviewer = az repos policy required-reviewer create `
+    #  --blocking true --branch main --enabled true --repository-id $ri `
+    #  --message "main" --required-reviewer-ids $Reviewers `
+    #  --project "${{ parameters.projname }}" `
+    #  --organization "https://dev.azure.com/${{ parameters.orgname }}" | ConvertFrom-Json
+  displayName: 'Creating new repo from project-template'
+
+- powershell: |
+    $projUrl = "https://dev.azure.com/${{ parameters.orgname }}/${{ parameters.projname }}/"
+    $patToken = "$(PAT)"
+    $token = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes(":$($patToken)"))
+    $header = @{ Authorization = "Basic $token" }
+    $Url = "$($projUrl)_apis/build/definitions?api-version=5.1"
+
+    $json = @{
+        project = "${{ parameters.projname }}"
+        name = "${{ parameters.reponame_create }}-build-pipeline"
+        repository = @{
+            url = "https://${{ parameters.orgname }}@dev.azure.com/${{ parameters.orgname }}/${{ parameters.projname }}/_git/${{ parameters.reponame_create }}"
+            defaultBranch = "refs/heads/main"
+            id = "$(ri)"
+            type = "TfsGit"
+        }
+        process = @{
+            yamlFilename = "azure-pipelines.yml"
+            type = 2
+        }
+        path = "\A repo-automation-pipelines"
+        type = "build"
+    }
+
+    $body = $json | ConvertTo-Json -Depth 3
+    Invoke-RestMethod -Uri $Url -Headers $header -Body $body -Method Post -ContentType application/json
+  displayName: 'Create pipeline via REST'
